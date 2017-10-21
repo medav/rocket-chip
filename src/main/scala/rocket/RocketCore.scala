@@ -11,6 +11,7 @@ import freechips.rocketchip.tile._
 import freechips.rocketchip.util._
 import scala.collection.immutable.ListMap
 import scala.collection.mutable.ArrayBuffer
+import armor._
 
 case class RocketCoreParams(
   bootFreqHz: BigInt = 0,
@@ -193,6 +194,17 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
   val id_rs = id_raddr.map(rf.read _)
   val ctrl_killd = Wire(Bool())
   val id_npc = (ibuf.io.pc.asSInt + ImmGen(IMM_UJ, id_inst(0))).asUInt
+
+  //
+  // Read architectural registers for call convention decoding. This is used by the Armor
+  // system to extract args and return value for call tracking.
+  //
+  
+  val x10 = rf.read(10)
+  val x11 = rf.read(11)
+  // val x8 = rf.read(8)
+  val x2 = rf.read(2)
+  val ra = rf.read(1)
 
   val csr = Module(new CSRFile(perfEvents))
   val id_csr_en = id_ctrl.csr.isOneOf(CSR.S, CSR.C, CSR.W)
@@ -637,17 +649,48 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
   io.fpu.dmem_resp_type := io.dmem.resp.bits.typ
   io.fpu.dmem_resp_tag := dmem_resp_waddr
 
-  io.dmem.req.valid     := ex_reg_valid && ex_ctrl.mem
+  val mem_access = ex_reg_valid && ex_ctrl.mem
+
+  io.dmem.req.valid     := mem_access
   val ex_dcache_tag = Cat(ex_waddr, ex_ctrl.fp)
   require(coreDCacheReqTagBits >= ex_dcache_tag.getWidth)
   io.dmem.req.bits.tag  := ex_dcache_tag
   io.dmem.req.bits.cmd  := ex_ctrl.mem_cmd
   io.dmem.req.bits.typ  := ex_ctrl.mem_type
   io.dmem.req.bits.phys := Bool(false)
-  io.dmem.req.bits.addr := encodeVirtualAddress(ex_rs(0), alu.io.adder_out)
+  val vaddr = encodeVirtualAddress(ex_rs(0), alu.io.adder_out)
+  io.dmem.req.bits.addr := vaddr
   io.dmem.invalidate_lr := wb_xcpt
   io.dmem.s1_data.data := Mux(mem_ctrl.fp, io.fpu.store_data, mem_reg_rs2)
   io.dmem.s1_kill := killm_common || mem_breakpoint
+
+  val alloc_checker = Module(new AllocationChecker(64))
+  alloc_checker.io.csrs := csr.io.allocation_checker_csrs
+  alloc_checker.io.inst_pc := wb_reg_pc //Cat(Fill(64-vaddrBitsExtended, 0.U(1.W)), wb_reg_pc)
+  alloc_checker.io.arg0 := x10
+  alloc_checker.io.arg1 := x11
+  alloc_checker.io.ret := x10
+  alloc_checker.io.ret_addr := ra
+
+  val mem_vaddr = Reg(UInt())
+  mem_vaddr := vaddr
+
+  val mem_checker = Module(new MemoryChecker(64, 256))
+  mem_checker.io.csrs := csr.io.memory_checker_csrs
+  mem_checker.io.mem_check := csr.io.armor_ctrl.armor_en && mem_reg_valid && (mem_reg_load || mem_reg_store)
+  mem_checker.io.mem_addr := mem_vaddr
+  mem_checker.io.cache_operation := alloc_checker.io.cache_operation
+  mem_checker.io.cache_range_low := alloc_checker.io.cache_range_low
+  mem_checker.io.cache_range_high := alloc_checker.io.cache_range_high
+  mem_checker.io.cache_update_addr := alloc_checker.io.cache_update_addr
+  mem_checker.io.stack_pointer := x2
+
+  csr.io.armor_alarm := mem_checker.io.alarm
+
+  when (mem_checker.io.alarm) {
+    printf("Armor: ALARM: Invalid address access: 0x%x\n", vaddr)
+  }
+
 
   io.rocc.cmd.valid := wb_reg_valid && wb_ctrl.rocc && !replay_wb_common
   io.rocc.exception := wb_xcpt && csr.io.status.xs.orR
@@ -687,8 +730,9 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
     }
   }
   else {
-    printf("C%d: %d [%d] pc=[%x] W[r%d=%x][%d] R[r%d=%x] R[r%d=%x] inst=[%x] DASM(%x)\n",
+    printf("C%d: %d [%d] alarm=[%d] armor=[%d] pc=[%x] W[r%d=%x][%d] R[r%d=%x] R[r%d=%x] inst=[%x] DASM(%x)\n",
          io.hartid, csr.io.time(31,0), csr.io.trace(0).valid && !csr.io.trace(0).exception,
+         mem_checker.io.alarm, csr.io.armor_ctrl.armor_en, 
          csr.io.trace(0).iaddr(vaddrBitsExtended-1, 0),
          Mux(rf_wen && !(wb_set_sboard && wb_wen), rf_waddr, UInt(0)), rf_wdata, rf_wen,
          wb_reg_inst(19,15), Reg(next=Reg(next=ex_rs(0))),

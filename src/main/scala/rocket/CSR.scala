@@ -10,6 +10,7 @@ import freechips.rocketchip.tile._
 import freechips.rocketchip.util._
 import scala.collection.mutable.LinkedHashMap
 import Instructions._
+import armor._
 
 class MStatus extends Bundle {
   // not truly part of mstatus, but convenient
@@ -180,6 +181,11 @@ class CSRFileIO(implicit p: Parameters) extends CoreBundle
     val write_flush = Bool(OUTPUT)
     val system_illegal = Bool(OUTPUT)
   }
+
+  val armor_ctrl = (new ArmorCtrl(xLen)).asOutput
+  val memory_checker_csrs = (new MemoryCheckerCsrs(xLen)).asOutput
+  val allocation_checker_csrs = (new AllocationCheckerCsrs(xLen)).asOutput
+  val armor_alarm = Bool(INPUT)
 
   val csr_stall = Bool(OUTPUT)
   val eret = Bool(OUTPUT)
@@ -432,6 +438,41 @@ class CSRFile(perfEventSets: EventSets = new EventSets(Seq()))(implicit p: Param
     read_mapping += CSRs.medeleg -> reg_medeleg
   }
 
+  //
+  // Armor CSRs (read)
+  //
+  
+  val reset_armor_ctrl = Wire(init = new ArmorCtrl(xLen).fromBits(0))
+  val armor_ctrl = Reg(init = reset_armor_ctrl)
+  val armor_magic = Reg(init = 0xBEEF.U(xLen))
+  val armor_status = Reg(UInt(xLen))
+
+  io.armor_ctrl := armor_ctrl
+
+  armor_status := io.armor_alarm.asUInt()
+
+  read_mapping += CSRs.arctrl -> armor_ctrl.asUInt
+  read_mapping += CSRs.arstat -> armor_status.asUInt
+
+  val memory_checker_csrs = Reg(new MemoryCheckerCsrs(xLen))
+  io.memory_checker_csrs := memory_checker_csrs
+
+  read_mapping += CSRs.artexts -> memory_checker_csrs.text_start
+  read_mapping += CSRs.artexte -> memory_checker_csrs.text_end
+  read_mapping += CSRs.ardatas -> memory_checker_csrs.data_start
+  read_mapping += CSRs.arbsse -> memory_checker_csrs.bss_end
+  read_mapping += CSRs.arstacks -> memory_checker_csrs.stack_base
+
+  val allocation_checker_csrs = Reg(new AllocationCheckerCsrs(xLen))
+  io.allocation_checker_csrs := allocation_checker_csrs
+
+  read_mapping += CSRs.armalloc -> allocation_checker_csrs.func_start_addrs(0)
+  read_mapping += CSRs.arcalloc -> allocation_checker_csrs.func_start_addrs(1)
+  read_mapping += CSRs.arrealloc -> allocation_checker_csrs.func_start_addrs(2)
+  read_mapping += CSRs.arfree -> allocation_checker_csrs.func_start_addrs(3)
+  read_mapping += CSRs.armmap -> allocation_checker_csrs.func_start_addrs(4)
+  read_mapping += CSRs.armunmap -> allocation_checker_csrs.func_start_addrs(5)
+
   val pmpCfgPerCSR = xLen / new PMPConfig().getWidth
   def pmpCfgIndex(i: Int) = (xLen / 32) * (i / pmpCfgPerCSR)
   if (reg_pmp.nonEmpty) {
@@ -631,6 +672,30 @@ class CSRFile(perfEventSets: EventSets = new EventSets(Seq()))(implicit p: Param
       when (decoded_addr(CSRs.mtvec))  { reg_mtvec := ~(~wdata | 2.U | Mux(wdata(0), UInt(((BigInt(1) << mtvecInterruptAlign) - 1) << mtvecBaseAlign), 0.U)) }
     when (decoded_addr(CSRs.mcause))   { reg_mcause := wdata & UInt((BigInt(1) << (xLen-1)) + 31) /* only implement 5 LSBs and MSB */ }
     when (decoded_addr(CSRs.mbadaddr)) { reg_mbadaddr := wdata(vaddrBitsExtended-1,0) }
+
+    //
+    // Armor CSRs (write)
+    //
+
+    when (decoded_addr(CSRs.arctrl)) {
+      print("Write arctrl\n")
+      val new_armor_ctrl = new ArmorCtrl(xLen).fromBits(wdata)
+      armor_ctrl.armor_en := new_armor_ctrl.armor_en
+    }
+
+    when (decoded_addr(CSRs.artexts)) { memory_checker_csrs.text_start := wdata }
+    when (decoded_addr(CSRs.artexte)) { memory_checker_csrs.text_end := wdata }
+    when (decoded_addr(CSRs.ardatas)) { memory_checker_csrs.data_start := wdata }
+    when (decoded_addr(CSRs.arbsse)) { memory_checker_csrs.bss_end := wdata }
+    when (decoded_addr(CSRs.arstacks)) { memory_checker_csrs.stack_base := wdata }
+
+    when (decoded_addr(CSRs.armalloc)) { allocation_checker_csrs.func_start_addrs(0) := wdata }
+    when (decoded_addr(CSRs.arcalloc)) { allocation_checker_csrs.func_start_addrs(1) := wdata }
+    when (decoded_addr(CSRs.arrealloc)) { allocation_checker_csrs.func_start_addrs(2) := wdata }
+    when (decoded_addr(CSRs.arfree)) { allocation_checker_csrs.func_start_addrs(3) := wdata }
+    when (decoded_addr(CSRs.armmap)) { allocation_checker_csrs.func_start_addrs(4) := wdata }
+    when (decoded_addr(CSRs.armunmap)) { allocation_checker_csrs.func_start_addrs(5) := wdata }
+
 
     for (((e, c), i) <- (reg_hpmevent zip reg_hpmcounter) zipWithIndex) {
       writeCounter(i + CSR.firstMHPC, c, wdata)
