@@ -274,6 +274,33 @@ object CSRs {
   val mip = 0x344
   val mucounteren = 0x310
   val mscounteren = 0x311
+  //
+  // Armor CSRs
+  //
+
+  val arctrl = 0x400   // Armor control/status
+  val arstat = 0x401
+
+  //
+  // Armor range filter CSRs
+  //
+
+  val artexts = 0x404  // .text_start
+  val artexte = 0x405  // .text_end
+  val ardatas = 0x406  // .data_start
+  val arbsse = 0x407   // .bss_end
+  val arstacks = 0x408 // stack_base
+
+  //
+  // Armor function tracking addresses
+  //
+
+  val armalloc = 0x410
+  val arcalloc = 0x411
+  val arrealloc = 0x412
+  val arfree = 0x413
+  val armmap = 0x414
+  val armunmap = 0x415
   val mucycle_delta = 0x700
   val mutime_delta = 0x701
   val muinstret_delta = 0x702
@@ -340,6 +367,18 @@ object CSRs {
     res += mip
     res += mucounteren
     res += mscounteren
+    res += arctrl
+    res += artexts
+    res += artexte
+    res += ardatas
+    res += arbsse
+    res += arstacks
+    res += armalloc
+    res += arcalloc
+    res += arrealloc
+    res += arfree
+    res += armmap
+    res += armunmap
     res += mucycle_delta
     res += mutime_delta
     res += muinstret_delta
